@@ -29,7 +29,7 @@ import org.apache.flink.streaming.api.transformations.OneInputTransformation;
 
 import org.apache.flink.shaded.guava31.com.google.common.collect.Lists;
 
-import org.junit.jupiter.api.Assertions;
+import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -53,6 +53,7 @@ class DataSinkTranslatorTest {
                 inputStream,
                 mockPreWriteWithoutCommitSink,
                 "testPreWriteWithoutCommitSink",
+                false,
                 new OperatorID());
 
         // Check if the `addPreWriteTopology` is called, and the uid is set when the transformation
@@ -60,7 +61,7 @@ class DataSinkTranslatorTest {
         OneInputTransformation<Event, Event> oneInputTransformation =
                 (OneInputTransformation) env.getTransformations().get(0);
         Transformation<?> reblanceTransformation = oneInputTransformation.getInputs().get(0);
-        Assertions.assertEquals(uid, reblanceTransformation.getUserProvidedNodeHash());
+        Assertions.assertThat(reblanceTransformation.getUserProvidedNodeHash()).isEqualTo(uid);
     }
 
     private static class EmptyEvent implements Event {}

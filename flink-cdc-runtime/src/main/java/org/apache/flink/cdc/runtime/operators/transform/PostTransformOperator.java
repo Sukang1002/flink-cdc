@@ -22,6 +22,7 @@ import org.apache.flink.api.java.tuple.Tuple3;
 import org.apache.flink.cdc.common.configuration.Configuration;
 import org.apache.flink.cdc.common.data.RecordData;
 import org.apache.flink.cdc.common.data.binary.BinaryRecordData;
+import org.apache.flink.cdc.common.event.ChangeEvent;
 import org.apache.flink.cdc.common.event.CreateTableEvent;
 import org.apache.flink.cdc.common.event.DataChangeEvent;
 import org.apache.flink.cdc.common.event.Event;
@@ -37,6 +38,7 @@ import org.apache.flink.cdc.common.utils.SchemaMergingUtils;
 import org.apache.flink.cdc.common.utils.SchemaUtils;
 import org.apache.flink.cdc.runtime.operators.transform.converter.PostTransformConverter;
 import org.apache.flink.cdc.runtime.operators.transform.converter.PostTransformConverters;
+import org.apache.flink.cdc.runtime.operators.transform.exceptions.TransformException;
 import org.apache.flink.cdc.runtime.parser.TransformParser;
 import org.apache.flink.streaming.api.graph.StreamConfig;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
@@ -81,7 +83,7 @@ public class PostTransformOperator extends AbstractStreamOperator<Event>
     private List<UserDefinedFunctionDescriptor> udfDescriptors;
     private transient Map<String, Object> udfFunctionInstances;
 
-    private transient Map<Tuple2<TableId, TransformProjection>, TransformProjectionProcessor>
+    private transient Map<Tuple2<TableId, String>, TransformProjectionProcessor>
             transformProjectionProcessorMap;
     private transient Map<Tuple2<TableId, TransformFilter>, TransformFilterProcessor>
             transformFilterProcessorMap;
@@ -244,6 +246,29 @@ public class PostTransformOperator extends AbstractStreamOperator<Event>
     @Override
     public void processElement(StreamRecord<Event> element) throws Exception {
         Event event = element.getValue();
+
+        try {
+            processEvent(event);
+        } catch (Exception e) {
+            TableId tableId = null;
+            Schema schemaBefore = null;
+            Schema schemaAfter = null;
+
+            if (event instanceof ChangeEvent) {
+                tableId = ((ChangeEvent) event).tableId();
+
+                PostTransformChangeInfo info = postTransformChangeInfoMap.get(tableId);
+                if (info != null) {
+                    schemaBefore = info.getPreTransformedSchema();
+                    schemaAfter = info.getPostTransformedSchema();
+                }
+            }
+            throw new TransformException(
+                    "post-transform", event, tableId, schemaBefore, schemaAfter, e);
+        }
+    }
+
+    private void processEvent(Event event) throws Exception {
         if (event instanceof SchemaChangeEvent) {
             SchemaChangeEvent schemaChangeEvent = (SchemaChangeEvent) event;
             transformProjectionProcessorMap
@@ -355,12 +380,14 @@ public class PostTransformOperator extends AbstractStreamOperator<Event>
         for (PostTransformer transform : transforms) {
             Selectors selectors = transform.getSelectors();
             if (selectors.isMatch(tableId) && transform.getProjection().isPresent()) {
-                TransformProjection transformProjection = transform.getProjection().get();
+                TransformProjection transformProjection =
+                        TransformProjection.of(transform.getProjection().get().getProjection())
+                                .get();
                 if (transformProjection.isValid()) {
                     if (!transformProjectionProcessorMap.containsKey(
-                            Tuple2.of(tableId, transformProjection))) {
+                            Tuple2.of(tableId, transformProjection.getProjection()))) {
                         transformProjectionProcessorMap.put(
-                                Tuple2.of(tableId, transformProjection),
+                                Tuple2.of(tableId, transformProjection.getProjection()),
                                 TransformProjectionProcessor.of(
                                         transformProjection,
                                         timezone,
@@ -370,10 +397,10 @@ public class PostTransformOperator extends AbstractStreamOperator<Event>
                     }
                     TransformProjectionProcessor postTransformProcessor =
                             transformProjectionProcessorMap.get(
-                                    Tuple2.of(tableId, transformProjection));
+                                    Tuple2.of(tableId, transformProjection.getProjection()));
                     // update the columns of projection and add the column of projection into Schema
                     newSchemas.add(
-                            postTransformProcessor.processSchemaChangeEvent(
+                            postTransformProcessor.processSchema(
                                     schema, transform.getSupportedMetadataColumns()));
                 }
             }
@@ -407,7 +434,7 @@ public class PostTransformOperator extends AbstractStreamOperator<Event>
                 Optional<TransformFilter> transformFilterOptional = transform.getFilter();
 
                 if (transformFilterOptional.isPresent()
-                        && transformFilterOptional.get().isVaild()) {
+                        && transformFilterOptional.get().isValid()) {
                     TransformFilter transformFilter = transformFilterOptional.get();
                     if (!transformFilterProcessorMap.containsKey(
                             Tuple2.of(tableId, transformFilter))) {
@@ -434,12 +461,9 @@ public class PostTransformOperator extends AbstractStreamOperator<Event>
                         && transformProjectionOptional.get().isValid()) {
                     TransformProjection transformProjection = transformProjectionOptional.get();
                     if (!transformProjectionProcessorMap.containsKey(
-                                    Tuple2.of(tableId, transformProjection))
-                            || !transformProjectionProcessorMap
-                                    .get(Tuple2.of(tableId, transformProjection))
-                                    .hasTableInfo()) {
+                            Tuple2.of(tableId, transformProjection.getProjection()))) {
                         transformProjectionProcessorMap.put(
-                                Tuple2.of(tableId, transformProjection),
+                                Tuple2.of(tableId, transformProjection.getProjection()),
                                 TransformProjectionProcessor.of(
                                         tableInfo,
                                         transformProjection,
@@ -447,10 +471,26 @@ public class PostTransformOperator extends AbstractStreamOperator<Event>
                                         udfDescriptors,
                                         getUdfFunctionInstances(),
                                         transform.getSupportedMetadataColumns()));
+                    } else if (!transformProjectionProcessorMap
+                            .get(Tuple2.of(tableId, transformProjection.getProjection()))
+                            .hasTableInfo()) {
+                        TransformProjectionProcessor transformProjectionProcessorWithoutTableInfo =
+                                transformProjectionProcessorMap.get(
+                                        Tuple2.of(tableId, transformProjection.getProjection()));
+                        transformProjectionProcessorMap.put(
+                                Tuple2.of(tableId, transformProjection.getProjection()),
+                                TransformProjectionProcessor.of(
+                                        tableInfo,
+                                        transformProjectionProcessorWithoutTableInfo
+                                                .getTransformProjection(),
+                                        timezone,
+                                        udfDescriptors,
+                                        getUdfFunctionInstances(),
+                                        transform.getSupportedMetadataColumns()));
                     }
                     TransformProjectionProcessor postTransformProcessor =
                             transformProjectionProcessorMap.get(
-                                    Tuple2.of(tableId, transformProjection));
+                                    Tuple2.of(tableId, transformProjection.getProjection()));
                     dataChangeEventOptional =
                             processProjection(
                                     postTransformProcessor,

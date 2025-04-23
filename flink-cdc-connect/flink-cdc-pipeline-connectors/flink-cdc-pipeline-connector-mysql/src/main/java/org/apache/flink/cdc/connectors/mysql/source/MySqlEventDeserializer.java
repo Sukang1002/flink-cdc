@@ -62,6 +62,8 @@ public class MySqlEventDeserializer extends DebeziumEventDeserializationSchema {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     private final boolean includeSchemaChanges;
+    private final boolean tinyInt1isBit;
+    private final boolean includeComments;
 
     private transient Tables tables;
     private transient CustomMySqlAntlrDdlParser customParser;
@@ -69,24 +71,35 @@ public class MySqlEventDeserializer extends DebeziumEventDeserializationSchema {
     private List<MySqlReadableMetadata> readableMetadataList;
 
     public MySqlEventDeserializer(
-            DebeziumChangelogMode changelogMode, boolean includeSchemaChanges) {
-        this(changelogMode, includeSchemaChanges, new ArrayList<>());
+            DebeziumChangelogMode changelogMode,
+            boolean includeSchemaChanges,
+            boolean tinyInt1isBit) {
+        this(
+                changelogMode,
+                includeSchemaChanges,
+                new ArrayList<>(),
+                includeSchemaChanges,
+                tinyInt1isBit);
     }
 
     public MySqlEventDeserializer(
             DebeziumChangelogMode changelogMode,
             boolean includeSchemaChanges,
-            List<MySqlReadableMetadata> readableMetadataList) {
+            List<MySqlReadableMetadata> readableMetadataList,
+            boolean includeComments,
+            boolean tinyInt1isBit) {
         super(new MySqlSchemaDataTypeInference(), changelogMode);
         this.includeSchemaChanges = includeSchemaChanges;
         this.readableMetadataList = readableMetadataList;
+        this.includeComments = includeComments;
+        this.tinyInt1isBit = tinyInt1isBit;
     }
 
     @Override
     protected List<SchemaChangeEvent> deserializeSchemaChangeRecord(SourceRecord record) {
         if (includeSchemaChanges) {
             if (customParser == null) {
-                customParser = new CustomMySqlAntlrDdlParser();
+                customParser = new CustomMySqlAntlrDdlParser(includeComments, tinyInt1isBit);
                 tables = new Tables();
             }
 
